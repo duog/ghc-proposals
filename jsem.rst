@@ -109,13 +109,20 @@ When the process that created the semaphore completes, either successfully or un
 
 - win32: ``CloseHandle``  [9]_
 
+2.3 Extra
+~~~~~~~~~
+
+To accomplish the goal of scaling a ghc process up and down as it acquires/releases tokens we must take care to account for the behaviour of the garbage collector. If we were to give ghc a fixed number ``N`` of capabilities, then parallel garbage collections in that ghc would recruit ``N`` OS threads. Instead we propose that ghc will adjust it’s number of capabilities via ``setNumCapabilities``  [10]_  to the number of modules it is compiling. Note that ghc already calls ``setNumCapabilities`` with the argument to ``-j``.
+
+We have concerns that rapidly adjusting the number of capabilities may have adverse effects: we propose that ghc will rate limit the release of tokens so as to reduce this thrashing. The exact mechanism of rate limiting is unspecified here.
+
 3 Examples
 ----------
 
 4 Effects and Interactions
 --------------------------
 
-Every participant in the protocol is always hold’s their implicit token, and so no participant is ever blocked from making progress by another participant.
+Every participant in the protocol always holds their implicit token, and so no participant is ever blocked from making progress by another participant.
 
 5 Costs and Drawbacks
 ---------------------
@@ -123,7 +130,7 @@ Every participant in the protocol is always hold’s their implicit token, and s
 6 Alternatives
 --------------
 
-GNU make supports a jobserver protocol  [10]_  [5]_  which is the same as the ghc jobserver protocol described above, except that:
+GNU make supports a jobserver protocol  [11]_  [5]_  which is the same as the ghc jobserver protocol described above, except that:
 
 - it uses posix pipes to exchange token’s between processes.
 
@@ -133,22 +140,31 @@ We have decided to depart in these aspects for the following reasons:
 
 - Other communities have considered and decided these aspects of the protocol are unsuitable.
 
-  - ocaml  [11]_   [12]_
+  - ocaml  [12]_   [13]_
 
-  - nix  [13]_
+  - nix  [14]_
 
 - We expect ``cabal-install`` and ``stack`` to be the only users of this feature in the near term. We think the proposed protocol is adequate for this use case.
 
 - We can extend ghc to use the GNU make jobserver protocol in the future, if there are users for it.
 
 
-Note that rust’s ``cargo`` does implement the GNU make jobserver protocol [14]_ .
+Note that rust’s ``cargo`` does implement the GNU make jobserver protocol [15]_ .
 
 7 Unresolved Questions
 ----------------------
 
+Syntax of command line flags.
+
+Should we also offer configuration of this feature via environment variables?
+
 8 Implementation Plan
 ---------------------
+
+We have a working implementation at [TODO]. Once this proposal is agreed we will prepare a patch for ``cabal-install`` and deliver it upstream.
+A prototype implementation was made by Douglas Wilson  [16]_ .
+A prototype implementation of the GNU make jobserver protocol was made by Ellie Hermaszewska [17]_ .
+Ongoing work from Well-Typed LLP is funded by Hasura.
 
 9 Endorsements
 --------------
@@ -254,12 +270,18 @@ Use jobserver exactly as make does.
 
 .. [9] `https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle <https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle>`_
 
-.. [10] `https://www.gnu.org/software/make/manual/make.html#Job-Slots <https://www.gnu.org/software/make/manual/make.html#Job-Slots>`_
+.. [10] `https://hackage.haskell.org/package/base-4.16.1.0/docs/Control-Concurrent.html#v:setNumCapabilities <https://hackage.haskell.org/package/base-4.16.1.0/docs/Control-Concurrent.html#v:setNumCapabilities>`_
 
-.. [11] `https://github.com/ocaml/opam/wiki/Spec-for-GNU-make-jobserver-support <https://github.com/ocaml/opam/wiki/Spec-for-GNU-make-jobserver-support>`_
+.. [11] `https://www.gnu.org/software/make/manual/make.html#Job-Slots <https://www.gnu.org/software/make/manual/make.html#Job-Slots>`_
 
-.. [12] `https://github.com/ocaml/dune/pull/4331 <https://github.com/ocaml/dune/pull/4331>`_
+.. [12] `https://github.com/ocaml/opam/wiki/Spec-for-GNU-make-jobserver-support <https://github.com/ocaml/opam/wiki/Spec-for-GNU-make-jobserver-support>`_
 
 .. [13] `https://github.com/ocaml/dune/pull/4331 <https://github.com/ocaml/dune/pull/4331>`_
 
-.. [14] `https://github.com/rust-lang/cargo/pull/4110 <https://github.com/rust-lang/cargo/pull/4110>`_
+.. [14] `https://github.com/ocaml/dune/pull/4331 <https://github.com/ocaml/dune/pull/4331>`_
+
+.. [15] `https://github.com/rust-lang/cargo/pull/4110 <https://github.com/rust-lang/cargo/pull/4110>`_
+
+.. [16] `https://gitlab.haskell.org/ghc/ghc/-/merge_requests/5176 <https://gitlab.haskell.org/ghc/ghc/-/merge_requests/5176>`_
+
+.. [17] `https://gitlab.haskell.org/ghc/ghc/-/merge_requests/7000 <https://gitlab.haskell.org/ghc/ghc/-/merge_requests/7000>`_

@@ -1,6 +1,13 @@
 #+title: Jsem
 #+author: Douglas Wilson
 
+#+begin_src emacs-lisp :exports none
+(org-rst-export-to-rst)
+#+end_src
+
+#+RESULTS:
+: jsem.rst
+
 We propose to extend ghc to allow many ghc processes to cooperate in sharing compute resources. Clients, such as ~cabal-install~ and ~stack~, may exploit this feature to execute build plans in shorter wall-time durations.
 
 The proposed changes are likely outside of the usual scope of ghc proposals. For the proposal to offer any value, the protocol herein should be implemented by ~cabal-install~ and ~stack~. Therefore we seek advice and agreement from the community.
