@@ -89,11 +89,16 @@ When the process that created the semaphore completes, either successfully or un
 
 
 
+** Extra
+To accomplish the goal of scaling a ghc process up and down as it acquires/releases tokens we must take care to account for the behaviour of the garbage collector. If we were to give ghc a fixed number ~N~ of capabilities, then parallel garbage collections in that ghc would recruit ~N~ OS threads. Instead we propose that ghc will adjust it's number of capabilities via ~setNumCapabilities~ [fn:17] to the number of modules it is compiling. Note that ghc already calls ~setNumCapabilities~ with the argument to ~-j~.
+
+We have concerns that rapidly adjusting the number of capabilities may have adverse effects: we propose that ghc will rate limit the release of tokens so as to reduce this thrashing. The exact mechanism of rate limiting is unspecified here.
+
 * Examples
 
 * Effects and Interactions
 
-Every participant in the protocol is always hold's their implicit token, and so no participant is ever blocked from making progress by another participant.
+Every participant in the protocol always holds their implicit token, and so no participant is ever blocked from making progress by another participant.
 
 * Costs and Drawbacks
 
@@ -115,7 +120,17 @@ We have decided to depart in these aspects for the following reasons:
 
 * Unresolved Questions
 
+Syntax of command line flags.
+
+Should we also offer configuration of this feature via environment variables?
+
+
 * Implementation Plan
+
+We have a working implementation at [TODO]. Once this proposal is agreed we will prepare a patch for ~cabal-install~ and deliver it upstream.
+A prototype implementation was made by Douglas Wilson [fn:15].
+A prototype implementation of the GNU make jobserver protocol was made by Ellie Hermaszewska[fn:16].
+Ongoing work from Well-Typed LLP is funded by Hasura.
 
 * Endorsements
 
@@ -189,6 +204,10 @@ Use jobserver exactly as make does.
 
 
 * Footnotes
+[fn:17]https://hackage.haskell.org/package/base-4.16.1.0/docs/Control-Concurrent.html#v:setNumCapabilities
+
+[fn:16]https://gitlab.haskell.org/ghc/ghc/-/merge_requests/7000
+[fn:15]https://gitlab.haskell.org/ghc/ghc/-/merge_requests/5176
 
 [fn:14]https://github.com/rust-lang/cargo/pull/4110
 [fn:13]  https://github.com/ocaml/dune/pull/4331
