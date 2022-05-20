@@ -37,6 +37,7 @@ In practice, a build plan is "wide" in some parts and "tall" in others. Some pac
 
 Build systems driving many invocations of ~cabal-install~, such as ~nix~, have the same problem described above. They would like to minimise the latency of many parallel invocations of ~cabal-install~, without oversaturating the available cores. [citation needed]
 
+
 * Proposed Change Specification
 
 ** Change to user manual
@@ -64,7 +65,8 @@ There are two kinds of participants in the ghc jobserver protocol:
 
 In the following, suppose the jobserver is running many jobclients and all participants are cooperating over the semaphore <sem> which has been initialised with a count of ~N-1~.
 
-All participants in the protocol maintain a pool of tokens. Each token is identical. A participant always holds at least one token (the implicit token).
+TODO this is unclear. perhaps remove idea of pool
+All participants in the protocol maintain a pool of tokens. Each token is identical. A participant always holds at least one token (the implicit token). A participant may choose to acquire or release tokens in it's pool at any time by operations on the semaphore, but it must not release it's implicit token.
 
 A participant may try to acquire an additional token by waiting on <sem>.
 
@@ -86,63 +88,40 @@ When the process that created the semaphore completes, either successfully or un
  - win32: ~CloseHandle~ [fn:9]
 
 
- - When cabal-install has obtained a token, it invokes ghc. It passes -jsem <sem>.
 
- - When a ghc build has completed (successfully or not) the token is returned to cabal-install's internal pool.
+* Examples
 
- - When ghc determines it needs to build a module, a token is obtained from it's internal pool.
+* Effects and Interactions
 
- - When ghc has completed building a module, it returns the token to it's internal pool
+Every participant in the protocol is always hold's their implicit token, and so no participant is ever blocked from making progress by another participant.
 
- - When the size of ghc's internal token pool changes we will call ~setNumCapabilities~ to match the size of the pool.
-
-* Requirements
-
-A mechanism like GNU make jobserver [citation] to share cores between invocations of ~ghc --make~.
-
-Deadlock free
-
-Two roles:
- - jobserver
- - jobclient
-
-~ghc --make~ is only a jobclient
-
-~cabal-install~ and ~stack~ can be either jobclients (the ~nix~ case) or jobservers (the ~cabal build~ case).
-
-* Prior Art
-GNU make jobserver [citation]
-
-Rust ~cargo~. [citation]
-
-Ocaml ~dune~ [citation]
-
-ghc draft MRs [citation]
-
-
-
-* Rationale
-pipes interface sucks
-we can extend to pipes interface later
-
-* Implementation
-
-- Slow release:
-  ~setNumCapabilities~ is somewhat expensive, so we will
-  If we were to allow ghc to acquire/release tokens rapidly as modules completed we ex
-
-
-
-   One of the cases will hold:
-
-  - This instance of cabal-install has no components building. In this case, the ghc build is started without needing a token. Each instance of cabal-install has a token that it was started with: that token is a “free” token which can always be used by that cabal-install and only that cabal-install. So, every recursive invocation of cabal-install can always run at least one job at all times.
-
-  - This instance of cabal-install has one or more ghc build jobs running. In this case, cabal-install obtains a token from the  make does a blocking read of one byte on the jobserver pipe. When it returns, usually it means we have a new token we can use for this job.
+* Costs and Drawbacks
 
 * Alternatives
-Use jobserver exactly as make does.
 
-* User manual
+GNU make supports a jobserver protocol [fn:10][fn:5] which is the same as the ghc jobserver protocol described above, except that:
+ - it uses posix pipes to exchange token's between processes.
+ - participants in the protocol learn about it through environment variables and the state of file descriptors on process entry.
+
+We have decided to depart in these aspects for the following reasons:
+ - Other communities have considered and decided these aspects of the protocol are unsuitable.
+   - ocaml [fn:11] [fn:12]
+   - nix [fn:13]
+ - We expect ~cabal-install~ and ~stack~ to be the only users of this feature in the near term. We think the proposed protocol is adequate for this use case.
+ - We can extend ghc to use the GNU make jobserver protocol in the future, if there are users for it.
+
+
+ Note that rust's ~cargo~ does implement the GNU make jobserver protocol[fn:14].
+
+* Unresolved Questions
+
+* Implementation Plan
+
+* Endorsements
+
+
+* scratch
+** User manual
 
 
 
@@ -162,7 +141,62 @@ Differences:
 *
 
 
+** Requirements
+
+A mechanism like GNU make jobserver [citation] to share cores between invocations of ~ghc --make~.
+
+Deadlock free
+
+Two roles:
+ - jobserver
+ - jobclient
+
+~ghc --make~ is only a jobclient
+
+~cabal-install~ and ~stack~ can be either jobclients (the ~nix~ case) or jobservers (the ~cabal build~ case).
+
+** Prior Art
+GNU make jobserver [citation]
+
+Rust ~cargo~. [citation]
+
+Ocaml ~dune~ [citation]
+
+ghc draft MRs [citation]
+
+
+
+** Rationale
+pipes interface sucks
+we can extend to pipes interface later
+
+** Implementation
+
+- Slow release:
+  ~setNumCapabilities~ is somewhat expensive, so we will
+  If we were to allow ghc to acquire/release tokens rapidly as modules completed we ex
+
+
+
+   One of the cases will hold:
+
+  - This instance of cabal-install has no components building. In this case, the ghc build is started without needing a token. Each instance of cabal-install has a token that it was started with: that token is a “free” token which can always be used by that cabal-install and only that cabal-install. So, every recursive invocation of cabal-install can always run at least one job at all times.
+
+  - This instance of cabal-install has one or more ghc build jobs running. In this case, cabal-install obtains a token from the  make does a blocking read of one byte on the jobserver pipe. When it returns, usually it means we have a new token we can use for this job.
+
+** Alternatives
+Use jobserver exactly as make does.
+
+
 * Footnotes
+
+[fn:14]https://github.com/rust-lang/cargo/pull/4110
+[fn:13]  https://github.com/ocaml/dune/pull/4331
+
+[fn:12] https://github.com/ocaml/dune/pull/4331
+[fn:11] https://github.com/ocaml/opam/wiki/Spec-for-GNU-make-jobserver-support
+
+[fn:10]https://www.gnu.org/software/make/manual/make.html#Job-Slots
 [fn:9]https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
 
 [fn:8] https://man7.org/linux/man-pages/man3/sem_unlink.3.html

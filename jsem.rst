@@ -1,0 +1,265 @@
+====
+Jsem
+====
+
+    :Author: Douglas Wilson
+
+.. contents::
+
+We propose to extend ghc to allow many ghc processes to cooperate in sharing compute resources. Clients, such as ``cabal-install`` and ``stack``, may exploit this feature to execute build plans in shorter wall-time durations.
+
+The proposed changes are likely outside of the usual scope of ghc proposals. For the proposal to offer any value, the protocol herein should be implemented by ``cabal-install`` and ``stack``. Therefore we seek advice and agreement from the community.
+
+1 Motivation
+------------
+
+1.1 Background
+~~~~~~~~~~~~~~
+
+Ghc, when invoked as ``ghc --make`` compiles a single package component (or *unit*) consisting of many *modules*. ``cabal-install``, ``stack``, and other clients compute the dependencies of a unit, compose a build plan, and execute many ``ghc --make`` subprocesses; first to build the dependencies of the target unit and then the unit itself. This is the same in spirit, although of course different in detail, as unix ``make``.
+
+The ``ghc --make`` command accepts a ``-jN`` option to instruct it to compile up to ``N`` modules in parallel  [1]_ . Each of these modules consumes one OS thread(a ghc *capability*).
+
+``cabal-install`` and ``stack`` both also accept a ``-jN`` option [2]_  [3]_ , however the meaning here is different. It instructs the build tool to build up to ``N`` units (or packages) in parallel. Each of those units will be built by an invocation of ``ghc --make -j1``.
+
+In the sequel and for brevity we will use ``cabal`` commands in examples and exposition.
+
+1.2 Problem Description
+~~~~~~~~~~~~~~~~~~~~~~~
+
+As users, we would like to issue ``cabal build -jN`` and have all our build products built as soon as possible, using no more than ``N`` cores. Then ``cabal-install`` should endeavour to minimise this latency. It follows that we should endeavour to saturate those the allocated cores with work.
+
+There is a hidden cost in having a ghc program (such as ``ghc`` itself) run on fewer cpu cores than it’s capabilities: The stop-the-world cost of garbage collection becomes much more expensive. [citation needed].
+
+While both ``ghc --make`` and ``cabal-install`` are able to parallelise their workloads, this parallelism does not compose [4]_ . For example:
+
+1. ``cabal build -j8 --ghc-options=-j8`` compiles 8 units in parallel and each invocation of ``ghc --make`` compiles 8 modules in parallel. Then, we can expect to be compiling up to 64 modules in parallel.
+
+2. ``cabal build -j` --ghc-options=-j8`` compiles 1 unit at a time and each invocation of ``ghc --make`` compiles 8 modules in parallel
+
+3. ``cabal build -j8` --ghc-options=-j1`` compiles 8 units at a time and each invocation of ``ghc --make`` compiles 1 modules in parallel
+
+4. ``cabal build -j2` --ghc-options=-j4`` compiles 2 units at a time and each invocation of ``ghc --make`` compiles 4 modules in parallel
+
+Each of *(2)*, *(3)*, and *(4)* are invocations today that satisfy the constraint of using no more than 8 cores, however in many cases they will fail to saturate those cores. A “wide” build plan, consisting of many small units (where a small unit is unit with a small number of modules, TODO footnote actually what matters is available parallelism) without interdependencies, should prefer *(3)* above. A “tall” build plan, consisting of large modules, should prefer \`/(2)/\`.
+
+TODO vvv this is not concrete enough. gutted. Need a real example I think. The point is that there is a big win from dynamically allocating cores.
+
+In practice, a build plan is “wide” in some parts and “tall” in others. Some packages, e.g. ``vector`` have many large modules, while a build plan may have many small units depending on ``vector``. The optimal build strategy here is to assign all cores to building ``vector`` and then, once that is complete, to build each of it’s dependencies on a single core.
+
+Build systems driving many invocations of ``cabal-install``, such as ``nix``, have the same problem described above. They would like to minimise the latency of many parallel invocations of ``cabal-install``, without oversaturating the available cores. [citation needed]
+
+2 Proposed Change Specification
+-------------------------------
+
+2.1 Change to user manual
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: ReST
+
+    .. ghc-flag:: -jsem ⟨sem⟩
+        :shortdesc: When compiling with :ghc-flag:`--make`, coordinate with other instances of ghc through ⟨sem⟩ to compile modules in parallel.
+        :type: dynamic
+        :category: misc
+
+        Perform compilation in parallel when possible, coordinating with other processors through the ghc jobserver protocol, through the semaphore ⟨sem⟩.
+
+        Use of `-jsem` will override use of :ghc-flag:`-j[⟨n⟩]` and vice versa.
+
+2.2 Ghc Jobserver Protocol
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Note that this is taken near verbatim from  [5]_ .
+
+The Ghc Jobserver Protocol allows a client to invoke many instances of ghc dynamically, and while restricting all of those instances to use no more than <n> capabilities. This is achieved by coordination over a semaphore, either a posix sempaphore [6]_  in the case of linux and Darwin, or a Win32 Semaphore [7]_  in the case of Windows platforms.
+
+There are two kinds of participants in the ghc jobserver protocol:
+
+- jobserver: Responsible for creating and destroying the semaphore. Responsible for starting jobclient subprocesses. Responsible for acquiring and releasing a token for each jobclient it starts.
+
+- jobclient: A process run by the jobserver. The jobclient is able to request more compute capacity by waiting on the semaphore. The jobclient is responsible for ~release~ing the semaphore exactly as many times as it ~wait~ed.
+
+In the following, suppose the jobserver is running many jobclients and all participants are cooperating over the semaphore <sem> which has been initialised with a count of ``N-1``.
+
+TODO this is unclear. perhaps remove idea of pool
+All participants in the protocol maintain a pool of tokens. Each token is identical. A participant always holds at least one token (the implicit token). A participant may choose to acquire or release tokens in it’s pool at any time by operations on the semaphore, but it must not release it’s implicit token.
+
+A participant may try to acquire an additional token by waiting on <sem>.
+
+A participant must release all it’s non-implicit tokens by releasing on <sem>.
+
+A participant always owns it’s implicit token. A participant must not release on <sem> when only the implicit token is in it’s pool.
+
+A jobserver may start a jobclient. Exactly one of the following holds:
+
+- No jobclients are running: the implicit token is assigned to the new job, and it is started.
+
+- At least one jobclient is running: the jobserver waits on the semaphore for a token.
+  When the token is acquired the jobclient is started.
+
+When a jobclient completes, either successfully or unsuccessfully, exactly one of the following holds:
+
+- No jobclients are running: The just-completed jobclient held the implicit token, we take no action.
+
+- At least one jobclient is running: The jobserver releases on the semaphore
+
+When the process that created the semaphore completes, either successfully or unsuccessfully, it must free the semaphore.
+
+- posix: ``sem_unlink``  [8]_
+
+- win32: ``CloseHandle``  [9]_
+
+3 Examples
+----------
+
+4 Effects and Interactions
+--------------------------
+
+Every participant in the protocol is always hold’s their implicit token, and so no participant is ever blocked from making progress by another participant.
+
+5 Costs and Drawbacks
+---------------------
+
+6 Alternatives
+--------------
+
+GNU make supports a jobserver protocol  [10]_  [5]_  which is the same as the ghc jobserver protocol described above, except that:
+
+- it uses posix pipes to exchange token’s between processes.
+
+- participants in the protocol learn about it through environment variables and the state of file descriptors on process entry.
+
+We have decided to depart in these aspects for the following reasons:
+
+- Other communities have considered and decided these aspects of the protocol are unsuitable.
+
+  - ocaml  [11]_   [12]_
+
+  - nix  [13]_
+
+- We expect ``cabal-install`` and ``stack`` to be the only users of this feature in the near term. We think the proposed protocol is adequate for this use case.
+
+- We can extend ghc to use the GNU make jobserver protocol in the future, if there are users for it.
+
+
+Note that rust’s ``cargo`` does implement the GNU make jobserver protocol [14]_ .
+
+7 Unresolved Questions
+----------------------
+
+8 Implementation Plan
+---------------------
+
+9 Endorsements
+--------------
+
+10 scratch
+----------
+
+10.1 User manual
+~~~~~~~~~~~~~~~~
+
+Differences:
+
+- We will use a posix semaphore rather than pipes
+
+- 6: When a job is finished, one of these cases will hold:
+
+  - This instance of GHC still has one or more jobs running, and we have not acquired or released from the semaphore in the last <timeout>. In This case
+
+\*
+
+\*
+
+\*
+
+\*
+
+\*
+
+\*
+
+\*
+
+10.2 Requirements
+~~~~~~~~~~~~~~~~~
+
+A mechanism like GNU make jobserver [citation] to share cores between invocations of ``ghc --make``.
+
+Deadlock free
+
+Two roles:
+
+- jobserver
+
+- jobclient
+
+``ghc --make`` is only a jobclient
+
+``cabal-install`` and ``stack`` can be either jobclients (the ``nix`` case) or jobservers (the ``cabal build`` case).
+
+10.3 Prior Art
+~~~~~~~~~~~~~~
+
+GNU make jobserver [citation]
+
+Rust ``cargo``. [citation]
+
+Ocaml ``dune`` [citation]
+
+ghc draft MRs [citation]
+
+10.4 Rationale
+~~~~~~~~~~~~~~
+
+pipes interface sucks
+we can extend to pipes interface later
+
+10.5 Implementation
+~~~~~~~~~~~~~~~~~~~
+
+- Slow release:
+  ``setNumCapabilities`` is somewhat expensive, so we will
+  If we were to allow ghc to acquire/release tokens rapidly as modules completed we ex
+
+
+
+One of the cases will hold:
+
+- This instance of cabal-install has no components building. In this case, the ghc build is started without needing a token. Each instance of cabal-install has a token that it was started with: that token is a “free” token which can always be used by that cabal-install and only that cabal-install. So, every recursive invocation of cabal-install can always run at least one job at all times.
+
+- This instance of cabal-install has one or more ghc build jobs running. In this case, cabal-install obtains a token from the  make does a blocking read of one byte on the jobserver pipe. When it returns, usually it means we have a new token we can use for this job.
+
+10.6 Alternatives
+~~~~~~~~~~~~~~~~~
+
+Use jobserver exactly as make does.
+
+
+.. [1] `https://downloads.haskell.org/ghc/latest/docs/html/users_guide/using.html?highlight=j#using-ghc-make <https://downloads.haskell.org/ghc/latest/docs/html/users_guide/using.html?highlight=j#using-ghc-make>`_
+
+.. [2] `https://cabal.readthedocs.io/en/3.6/cabal-project.html?highlight=%22-j%22#cfg-flag---jobs <https://cabal.readthedocs.io/en/3.6/cabal-project.html?highlight=%22-j%22#cfg-flag---jobs>`_
+
+.. [3] `https://docs.haskellstack.org/en/stable/yaml_configuration/#jobs <https://docs.haskellstack.org/en/stable/yaml_configuration/#jobs>`_
+
+.. [4] `https://github.com/haskell/cabal/issues/976 <https://github.com/haskell/cabal/issues/976>`_
+
+.. [5] `http://make.mad-scientist.net/papers/jobserver-implementation/ <http://make.mad-scientist.net/papers/jobserver-implementation/>`_
+
+.. [6] `https://man7.org/linux/man-pages/man7/sem_overview.7.html <https://man7.org/linux/man-pages/man7/sem_overview.7.html>`_
+
+.. [7] `https://docs.microsoft.com/en-us/windows/win32/sync/semaphore-objects <https://docs.microsoft.com/en-us/windows/win32/sync/semaphore-objects>`_
+
+.. [8] `https://man7.org/linux/man-pages/man3/sem_unlink.3.html <https://man7.org/linux/man-pages/man3/sem_unlink.3.html>`_
+
+.. [9] `https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle <https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle>`_
+
+.. [10] `https://www.gnu.org/software/make/manual/make.html#Job-Slots <https://www.gnu.org/software/make/manual/make.html#Job-Slots>`_
+
+.. [11] `https://github.com/ocaml/opam/wiki/Spec-for-GNU-make-jobserver-support <https://github.com/ocaml/opam/wiki/Spec-for-GNU-make-jobserver-support>`_
+
+.. [12] `https://github.com/ocaml/dune/pull/4331 <https://github.com/ocaml/dune/pull/4331>`_
+
+.. [13] `https://github.com/ocaml/dune/pull/4331 <https://github.com/ocaml/dune/pull/4331>`_
+
+.. [14] `https://github.com/rust-lang/cargo/pull/4110 <https://github.com/rust-lang/cargo/pull/4110>`_
